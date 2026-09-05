@@ -14,8 +14,8 @@
 ## Быстрый старт (локально)
 
 ```powershell
-git clone https://github.com/lllexalllepexa/portfolio_data_analyst-main.git
-cd portfolio_data_analyst-main
+git clone https://github.com/lllexalllepexa/testsomeshi.git
+cd testsomeshi
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -67,7 +67,7 @@ python -m superstore.etl.load_and_clean
 ## Структура
 
 ```
-portfolio_data_analyst/
+testsomeshi/
 ├── superstore/      Python: ETL, анализ, загрузчики
 ├── dashboard/       Streamlit
 ├── sql/             PostgreSQL, DuckDB, ClickHouse, Greenplum
