@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import logging
+import os
 import socket
 import sys
 from pathlib import Path
@@ -17,9 +19,20 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
 ROOT = Path(__file__).resolve().parents[2]
 PARQUET = ROOT / "data" / "processed" / "orders_clean.parquet"
-URL = "postgresql+psycopg2://analyst:analyst@127.0.0.1:5432/superstore"
+
+# M8: URL из переменной окружения, fallback для локальной разработки
+URL = os.getenv(
+    "SUPERSTORE_PG_URL",
+    "postgresql+psycopg2://analyst:analyst@127.0.0.1:5432/superstore",
+)
 
 
 def _port_open(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -37,7 +50,7 @@ def main(url: str = URL) -> None:
         )
 
     if not _port_open("127.0.0.1", 5432):
-        print(
+        logger.error(
             "PostgreSQL на порту 5432 недоступен.\n"
             "1. Запустите Docker Desktop (иконка в трее → Engine running).\n"
             "2. docker compose up -d postgres\n"
@@ -45,8 +58,7 @@ def main(url: str = URL) -> None:
             "\n"
             "Без Docker используйте SQL через DuckDB:\n"
             "  .\\scripts\\sql_duckdb_demo.ps1\n"
-            "  или: docs/sql_postgres.md",
-            file=sys.stderr,
+            "  или: docs/sql_postgres.md"
         )
         raise SystemExit(1)
 
@@ -60,20 +72,38 @@ def main(url: str = URL) -> None:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception as exc:
-        print(
+        logger.error(
             "Не удалось подключиться к PostgreSQL.\n"
-            f"URL: {url}\n"
-            f"Ошибка: {exc}\n\n"
+            "URL: %s\nОшибка: %s\n\n"
             "Проверьте: docker compose ps\n"
             "Логи: docker compose logs postgres",
-            file=sys.stderr,
+            url,
+            exc,
         )
         raise SystemExit(1) from exc
 
-    df.to_sql("orders", engine, if_exists="replace", index=False, chunksize=5000)
-    with engine.connect() as conn:
-        n = conn.execute(text("SELECT COUNT(*) FROM orders")).scalar()
-    print(f"PostgreSQL: в таблице orders — {n:,} строк")
+    try:
+        # C5: атомарная загрузка через staging-таблицу
+        df.to_sql(
+            "orders_staging", engine, if_exists="replace", index=False, chunksize=5000
+        )
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS orders_old"))
+            conn.execute(text("ALTER TABLE IF EXISTS orders RENAME TO orders_old"))
+            conn.execute(text("ALTER TABLE orders_staging RENAME TO orders"))
+            conn.execute(text("DROP TABLE IF EXISTS orders_old"))
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS idx_orders_order_date ON orders (order_date)")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS idx_orders_region ON orders (region)")
+            )
+        with engine.connect() as conn:
+            n = conn.execute(text("SELECT COUNT(*) FROM orders")).scalar()
+        logger.info("PostgreSQL: в таблице orders — %s строк", f"{n:,}")
+    finally:
+        # M6: освобождаем пул соединений
+        engine.dispose()
 
 
 if __name__ == "__main__":

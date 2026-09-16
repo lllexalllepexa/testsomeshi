@@ -88,6 +88,11 @@ QUALITY_CHECKS_RU: dict[str, str] = {
     "valid_years": "годы 2011–2014",
     "regions_present": "регионы в данных",
     "order_dates_populated": "даты заказов заполнены",
+    "row_id_unique": "уникальность row_id",
+    "valid_category": "валидные категории",
+    "valid_segment": "валидные сегменты",
+    "valid_ship_mode": "валидные режимы доставки",
+    "valid_region_values": "валидные значения регионов",
 }
 
 FEATURES_RU: dict[str, str] = {
