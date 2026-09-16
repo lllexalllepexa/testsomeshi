@@ -45,7 +45,7 @@
 
 Интерактивная панель с фильтрами по регионам, годам и категориям:
 
-![Дашборд Streamlit](docs/images/dashboard_screenshot.jpg)
+![Дашборд Streamlit](docs/images/dashboard_screenshot.png)
 
 ---
 
