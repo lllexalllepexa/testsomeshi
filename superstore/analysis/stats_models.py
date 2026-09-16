@@ -73,7 +73,7 @@ def pca_segment_profiles(df: pd.DataFrame) -> pd.DataFrame:
     out = agg.copy()
     out["ГК1"] = scores[:, 0]
     out["ГК2"] = scores[:, 1]
-    out.attrs["explained_variance_ratio"] = pca.explained_variance_ratio_
+    out.attrs["explained_variance_ratio"] = pca.explained_variance_ratio_.tolist()
     return out
 
 

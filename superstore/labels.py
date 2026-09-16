@@ -64,6 +64,9 @@ REGION_RU: dict[str, str] = {
     "Caribbean": "Карибы",
     "North America": "Северная Америка",
     "South America": "Южная Америка",
+    "Canada": "Канада",
+    "EMEA": "EMEA",
+    "North": "Север",
 }
 
 SHIP_MODE_RU: dict[str, str] = {
