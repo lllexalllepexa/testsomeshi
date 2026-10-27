@@ -1,0 +1,2 @@
+order_lines,orders,customers,sales,profit,margin,avg_discount,return_rate,loss_line_share,loss_lines_discounted_share,loss_lines_profit,deep_discount_sales_share,deep_discount_profit
+51290,25753,1590,12642501.91,1467457.29,0.1161,0.1429,0.0467,0.2446,1.0,-920646.16,0.1527,-814682.09

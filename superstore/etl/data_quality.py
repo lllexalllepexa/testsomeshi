@@ -1,4 +1,9 @@
-"""Проверки качества данных после ETL."""
+"""Data quality gate for the cleaned orders table.
+
+The ETL does not filter rows, so every check here can actually fail: a violation stops the pipeline
+instead of being silently dropped upstream.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -6,7 +11,40 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+from superstore.labels import (
+    CATEGORY_RU,
+    MARKET_RU,
+    ORDER_PRIORITY_RU,
+    QUALITY_CHECKS_RU,
+    REGION_RU,
+    SEGMENT_RU,
+    SHIP_MODE_RU,
+    SUB_CATEGORY_RU,
+)
+
+log = logging.getLogger(__name__)
+
+REQUIRED = [
+    "row_id",
+    "order_id",
+    "order_date",
+    "ship_date",
+    "customer_id",
+    "product_id",
+    "sales",
+    "quantity",
+    "discount",
+    "profit",
+]
+ENUMS: dict[str, dict[str, str]] = {
+    "category": CATEGORY_RU,
+    "sub_category": SUB_CATEGORY_RU,
+    "segment": SEGMENT_RU,
+    "market": MARKET_RU,
+    "region": REGION_RU,
+    "ship_mode": SHIP_MODE_RU,
+    "order_priority": ORDER_PRIORITY_RU,
+}
 
 
 @dataclass
@@ -14,94 +52,42 @@ class QualityReport:
     passed: bool
     checks: list[dict]
 
+    @property
+    def failures(self) -> list[str]:
+        return [c["check"] for c in self.checks if not c["ok"]]
 
-def run_checks(df: pd.DataFrame, min_rows: int = 10_000) -> QualityReport:
+
+def run_checks(df: pd.DataFrame, min_rows: int = 50_000, years: tuple[int, int] = (2011, 2014)) -> QualityReport:
     checks: list[dict] = []
 
-    def add(name: str, ok: bool, detail: str = "") -> None:
-        checks.append({"check": name, "ok": ok, "detail": detail})
+    def add(name: str, bad: int, detail: str = "") -> None:
+        checks.append({"check": name, "ok": bad == 0, "bad_rows": int(bad), "detail": detail})
 
-    add("row_count", len(df) >= min_rows, f"строк={len(df):,}")
-    add("no_null_order_id", df["order_id"].notna().all())
-    add("positive_sales", (df["sales"] > 0).all(), "вся выручка > 0")
-
-    margin = df["profit_margin"].dropna()
-    p99 = margin.abs().quantile(0.99)
+    add("row_count", int(len(df) < min_rows), f"rows={len(df):,}, expected >= {min_rows:,}")
+    add("row_id_unique", int(df["row_id"].duplicated().sum()))
+    add("required_not_null", int(df[REQUIRED].isna().any(axis=1).sum()), ", ".join(REQUIRED))
+    add("sales_positive", int((~(df["sales"] > 0)).sum()))
+    add("quantity_positive", int((~(df["quantity"] > 0)).sum()))
+    add("discount_range", int((~df["discount"].between(0, 1, inclusive="left")).sum()))
+    add("ship_after_order", int((df["ship_date"] < df["order_date"]).sum()))
     add(
-        "profit_margin_range",
-        p99 < 5,
-        f"99-й перц. |маржа|={p99:.2f}",
+        "years_in_range",
+        int((~df["order_date"].dt.year.between(*years)).sum()),
+        f"expected {years[0]}–{years[1]}",
     )
+    for col, allowed in ENUMS.items():
+        invalid = df[col].dropna()[~df[col].dropna().isin(allowed)]
+        add(f"valid_{col}", len(invalid), f"e.g. {sorted(invalid.unique())[:3]}" if len(invalid) else "")
 
-    add(
-        "valid_years",
-        df["year"].between(2011, 2014).fillna(False).all(),
-        f"годы={sorted(df['year'].dropna().unique().astype(int).tolist())}",
-    )
-
-    add(
-        "regions_present",
-        df["region"].nunique() >= 4,
-        f"регионов={df['region'].nunique()}",
-    )
-
-    # H2: ужесточено — 100% дат должны быть заполнены
-    # (NaT-строки теперь отсеиваются в clean(), но проверяем на всякий случай)
-    add(
-        "order_dates_populated",
-        df["order_date"].notna().all(),
-        f"заполнено дат={df['order_date'].notna().mean():.1%}",
-    )
-
-    # M3: проверяем уникальность row_id (если колонка есть)
-    if "row_id" in df.columns:
-        row_id_unique = df["row_id"].is_unique
-        add(
-            "row_id_unique",
-            row_id_unique,
-            f"уникальных row_id={df['row_id'].nunique():,} из {len(df):,}",
-        )
-
-    # M1: валидация enum-значений по словарям labels.py
-    from superstore.labels import CATEGORY_RU, REGION_RU, SEGMENT_RU, SHIP_MODE_RU
-
-    for col, valid_keys, label in (
-        ("category", set(CATEGORY_RU.keys()), "категории"),
-        ("segment", set(SEGMENT_RU.keys()), "сегменты"),
-        ("ship_mode", set(SHIP_MODE_RU.keys()), "режимы доставки"),
-    ):
-        if col in df.columns:
-            valid = df[col].dropna().isin(valid_keys)
-            invalid_count = (~valid).sum()
-            add(
-                f"valid_{col}",
-                invalid_count == 0,
-                f"невалидных {label}={invalid_count:,}",
-            )
-
-    # Регионы — проверяем отдельно, т.к. в Global Superstore их 13+
-    if "region" in df.columns:
-        valid_regions = set(REGION_RU.keys())
-        invalid_regions = df["region"].dropna()[~df["region"].dropna().isin(valid_regions)]
-        add(
-            "valid_region_values",
-            len(invalid_regions) == 0,
-            f"невалидных регионов={len(invalid_regions):,}",
-        )
-
-    passed = all(c["ok"] for c in checks)
-    return QualityReport(passed=passed, checks=checks)
+    return QualityReport(passed=all(c["ok"] for c in checks), checks=checks)
 
 
 def print_report(report: QualityReport) -> None:
-    from superstore.labels import QUALITY_CHECKS_RU
-
     for c in report.checks:
-        status = "ОК" if c["ok"] else "ОШИБКА"
-        name = QUALITY_CHECKS_RU.get(c["check"], c["check"])
-        detail = f" — {c['detail']}" if c.get("detail") else ""
-        logger.info("[%s] %s%s", status, name, detail)
+        status = "ОК" if c["ok"] else f"ОШИБКА ({c['bad_rows']:,} строк)"
+        detail = f" — {c['detail']}" if c["detail"] else ""
+        log.info("[%s] %s%s", status, QUALITY_CHECKS_RU.get(c["check"], c["check"]), detail)
     if report.passed:
-        logger.info("ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ")
+        log.info("Все %d проверок пройдены", len(report.checks))
     else:
-        logger.error("ЕСТЬ ОШИБКИ КАЧЕСТВА ДАННЫХ")
+        log.error("Проверки качества не пройдены: %s", ", ".join(report.failures))

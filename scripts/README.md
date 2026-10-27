@@ -1,15 +1,9 @@
 # Скрипты
 
-Запускать из **корня репозитория**.
+[`check.py`](check.py) — всё, что сделал бы CI: линтер Ruff, проверка форматирования и все тесты.
 
-| Скрипт | Назначение |
-|--------|------------|
-| [setup.ps1](setup.ps1) | venv + зависимости + ETL (если есть CSV) |
-| [run_pipeline.ps1](run_pipeline.ps1) | ETL → quality → EDA → stats |
-| [run_streamlit.ps1](run_streamlit.ps1) | Дашборд Streamlit |
-| [sql_duckdb_demo.ps1](sql_duckdb_demo.ps1) | SQL через DuckDB (без Docker) |
-| [run_postgres.ps1](run_postgres.ps1) | Docker Postgres + загрузка |
-| [run_airflow_docker.ps1](run_airflow_docker.ps1) | Тест DAG в Docker |
-| [run_airflow_test.ps1](run_airflow_test.ps1) | Airflow на Linux/WSL |
+```bash
+python scripts/check.py
+```
 
-Linux/macOS: [setup.sh](setup.sh)
+Тот же скрипт запускается перед каждым коммитом через pre-commit (`pre-commit install` один раз после установки).

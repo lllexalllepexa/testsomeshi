@@ -1,238 +1,167 @@
+"""ETL: the raw Global Superstore workbook (or a CSV export of its Orders sheet) -> cleaned Parquet.
+
+Run: python -m superstore.etl.load_and_clean [--raw PATH]
+
+Nothing is reconstructed or silently dropped: dates must be real dates, and every row that reaches
+the Parquet file passes the data quality gate first (superstore.etl.data_quality).
 """
-ETL: CSV -> cleaned Parquet + DuckDB + optional PostgreSQL.
-Run: python -m superstore.etl.load_and_clean
-"""
+
 from __future__ import annotations
 
 import argparse
 import logging
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
+from superstore import config
+from superstore.etl.data_quality import print_report, run_checks
 
-ROOT = Path(__file__).resolve().parents[2]
-RAW = ROOT / "data" / "raw" / "global_superstore.csv"
-OUT_PARQUET = ROOT / "data" / "processed" / "orders_clean.parquet"
-DUCKDB_PATH = ROOT / "data" / "processed" / "superstore.duckdb"
+log = logging.getLogger(__name__)
 
-RENAME = {
-    "Customer ID": "customer_id",
-    "Customer Name": "customer_name",
-    "Order Date": "order_date",
-    "Order ID": "order_id",
-    "Order Priority": "order_priority",
-    "Product ID": "product_id",
-    "Product Name": "product_name",
+# Raw header -> column name. Postal Code is left out: it is empty for 80% of rows (non-US orders).
+COLUMNS: dict[str, str] = {
     "Row ID": "row_id",
+    "Order ID": "order_id",
+    "Order Date": "order_date",
     "Ship Date": "ship_date",
     "Ship Mode": "ship_mode",
-    "Shipping Cost": "shipping_cost",
+    "Customer ID": "customer_id",
+    "Customer Name": "customer_name",
+    "Segment": "segment",
+    "City": "city",
+    "State": "state",
+    "Country": "country",
+    "Market": "market",
+    "Region": "region",
+    "Product ID": "product_id",
+    "Category": "category",
     "Sub-Category": "sub_category",
-    "ji_lu-shu": "record_count",
-    "Market2": "market_group",
+    "Product Name": "product_name",
+    "Sales": "sales",
+    "Quantity": "quantity",
+    "Discount": "discount",
+    "Profit": "profit",
+    "Shipping Cost": "shipping_cost",
+    "Order Priority": "order_priority",
 }
+NUMERIC = ["row_id", "sales", "quantity", "discount", "profit", "shipping_cost"]
+DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%d.%m.%Y")
+
+# The Returns sheet spells the US market out in full; the Orders sheet uses "US".
+RETURNS_MARKET_ALIASES = {"United States": "US"}
 
 
-def resolve_raw() -> Path:
-    if RAW.exists():
-        return RAW
-    raise FileNotFoundError(f"Положите CSV сюда: {RAW}")
+class RawDataError(ValueError):
+    """The raw file does not have the expected structure or contains values that are not data."""
 
 
-def repair_dates(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    В этом CSV даты часто битые (Excel: '00:00.0').
-    Восстанавливаем order_date из year + weeknum и order_id (CA-2011-…).
-    Используем ISO-8601 недели для корректного вычисления дат.
-    """
-    # H3: работаем с копией, не мутируем входной DataFrame
-    df = df.copy()
+def find_raw(raw_dir: Path = config.RAW_DIR) -> Path:
+    for pattern in ("*.xls", "*.xlsx", "*.csv"):
+        if found := sorted(raw_dir.glob(pattern)):
+            return found[0]
+    raise FileNotFoundError(f"No raw file in {raw_dir}. Download the dataset as described in README, section «Данные».")
 
-    year = pd.to_numeric(df.get("year"), errors="coerce")
-    from_id = df["order_id"].str.extract(r"-(\d{4})-", expand=False)
-    year = year.fillna(pd.to_numeric(from_id, errors="coerce"))
 
-    week = pd.to_numeric(df.get("weeknum"), errors="coerce")
+def read_raw(path: Path) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Return (orders, returns). A CSV has no Returns sheet, so returns is None."""
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path, low_memory=False), None
+    sheets = pd.read_excel(path, sheet_name=None, engine="calamine")
+    if "Orders" not in sheets:
+        raise RawDataError(f"{path.name}: no 'Orders' sheet (found {list(sheets)})")
+    return sheets["Orders"], sheets.get("Returns")
 
-    # M5: логируем fallback для weeknum
-    n_missing_week = week.isna().sum()
-    if n_missing_week > 0:
-        logger.warning(
-            "weeknum отсутствует в %d строках (%.1f%%), подставлено 26 (≈конец июня)",
-            n_missing_week,
-            100 * n_missing_week / len(df),
-        )
-    week = week.fillna(26).clip(1, 52)
 
-    # H1: используем ISO-8601 формат недель (%G-W%V-%u) вместо
-    # наивного Jan-1 + (week-1)*7, который даёт сдвиг до ±6 дней
-    iso_year = year.astype("Int64").astype(str)
-    iso_week = week.astype("Int64").astype(str).str.zfill(2)
-    order_date = pd.to_datetime(
-        iso_year + "-W" + iso_week + "-1",
-        format="%G-W%V-%u",
-        errors="coerce",
+def parse_dates(s: pd.Series, name: str) -> pd.Series:
+    """Parse a date column without guessing: the whole column must match one known format."""
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s.astype("datetime64[ns]").dt.normalize()
+    text = s.astype("string").str.strip()
+    for fmt in DATE_FORMATS:
+        parsed = pd.to_datetime(text, format=fmt, errors="coerce")
+        if parsed.notna().all():
+            return parsed.astype("datetime64[ns]")
+    bad = text[pd.to_datetime(text, format=DATE_FORMATS[0], errors="coerce").isna()]
+    raise RawDataError(
+        f"{name}: {len(bad):,} values are not dates (e.g. {bad.iloc[0]!r}). "
+        "Excel exports sometimes break dates into '00:00.0'; use the original workbook instead."
     )
 
-    ship_lag = {
-        "same day": 0,
-        "first class": 1,
-        "second class": 3,
-        "standard class": 5,
-    }
-    mode = df.get("ship_mode", pd.Series("", index=df.index)).astype(str).str.lower()
-    lag = mode.map(ship_lag).fillna(3).astype(int)
 
-    df["order_date"] = order_date
-    df["ship_date"] = order_date + pd.to_timedelta(lag, unit="D")
-    df["delivery_days"] = lag
+def returned_orders(returns: pd.DataFrame) -> pd.DataFrame:
+    """Distinct (order_id, market) pairs marked as returned."""
+    out = returns.rename(columns={"Order ID": "order_id", "Market": "market", "Returned": "returned"})
+    out = out[out["returned"].astype("string").str.strip().str.lower() == "yes"]
+    out["order_id"] = out["order_id"].astype("string").str.strip()
+    out["market"] = out["market"].astype("string").str.strip().replace(RETURNS_MARKET_ALIASES)
+    return out[["order_id", "market"]].drop_duplicates()
+
+
+def clean(orders: pd.DataFrame, returns: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Rename, type and enrich the Orders sheet. The input frame is not modified."""
+    if missing := [c for c in COLUMNS if c not in orders.columns]:
+        raise RawDataError(f"Missing columns: {missing}")
+    df = orders[list(COLUMNS)].rename(columns=COLUMNS)
+
+    for col in df.columns.difference(NUMERIC + ["order_date", "ship_date"]):
+        df[col] = df[col].astype("string").str.strip()
+    for col in NUMERIC:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["quantity"] = df["quantity"].astype("Int64")
+    df["row_id"] = df["row_id"].astype("Int64")
+    df["order_date"] = parse_dates(df["order_date"], "Order Date")
+    df["ship_date"] = parse_dates(df["ship_date"], "Ship Date")
+
+    n_before = len(df)
+    df = df.drop_duplicates().reset_index(drop=True)
+    if dropped := n_before - len(df):
+        log.info("Dropped %d exact duplicate rows", dropped)
+
+    if returns is None:
+        df["is_returned"] = pd.Series(pd.NA, index=df.index, dtype="boolean")
+    else:
+        flagged = returned_orders(returns).assign(is_returned=True)
+        df = df.merge(flagged, on=["order_id", "market"], how="left")  # pairs are distinct: no fan-out
+        df["is_returned"] = df["is_returned"].notna().astype("boolean")
+
+    # Order ID repeats across countries and customers in this dataset; Order ID + Customer ID identifies an order.
+    df["order_key"] = df["order_id"] + "|" + df["customer_id"]
+    df["year"] = df["order_date"].dt.year.astype("Int64")
+    df["delivery_days"] = (df["ship_date"] - df["order_date"]).dt.days.astype("Int64")
+    df["profit_margin"] = df["profit"] / df["sales"]
     return df
 
 
-def clean(df: pd.DataFrame) -> pd.DataFrame:
-    # H3: работаем с копией — не мутируем переданный DataFrame
-    df = df.rename(columns=RENAME)
-    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-
-    # M2: обрезаем пробелы во всех строковых колонках
-    str_cols = df.select_dtypes(include=["object", "string"]).columns
-    for col in str_cols:
-        df[col] = df[col].astype(str).str.strip()
-
-    numeric = ["sales", "profit", "quantity", "discount", "shipping_cost", "year", "weeknum"]
-    for col in numeric:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = repair_dates(df)
-
-    # H2: добавлена order_date в subset — NaT-даты не проходят дальше
-    df = df.dropna(subset=["order_id", "sales", "order_date"])
-    df = df[df["sales"] > 0]
-
-    # C3: дедупликация
-    initial_len = len(df)
-    df = df.drop_duplicates()
-    if "row_id" in df.columns:
-        df = df.drop_duplicates(subset=["row_id"], keep="first")
-    dropped = initial_len - len(df)
-    if dropped > 0:
-        logger.info("Удалено дубликатов: %s", f"{dropped:,}")
-
-    # L1: NaN-прибыль → margin = 0.0 (а не NaN, который пройдёт через dropna в QA)
-    df["profit_margin"] = (df["profit"] / df["sales"]).fillna(0.0)
-    return df
+def write_parquet(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp.parquet")
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)  # readers never see a half-written file
 
 
-def load_duckdb(df: pd.DataFrame, db_path: Path) -> None:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(db_path))
-    try:
-        con.execute("CREATE OR REPLACE TABLE orders AS SELECT * FROM df")
-        # M7: формула маржи синхронизирована с Postgres (SUM/SUM вместо AVG)
-        con.execute(
-            """
-            CREATE OR REPLACE VIEW mart_region_year AS
-            SELECT
-                region,
-                country,
-                CAST(year AS INTEGER) AS year,
-                COUNT(*) AS order_lines,
-                SUM(sales) AS revenue,
-                SUM(profit) AS profit,
-                SUM(profit) / NULLIF(SUM(sales), 0) AS avg_margin
-            FROM orders
-            GROUP BY 1, 2, 3
-            """
-        )
-    finally:
-        con.close()
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    parser = argparse.ArgumentParser(description="Global Superstore ETL: raw workbook -> cleaned Parquet")
+    parser.add_argument("--raw", type=Path, default=None, help="raw .xls/.xlsx/.csv (default: first file in data/raw)")
+    parser.add_argument("--out", type=Path, default=config.PARQUET)
+    parser.add_argument("--min-rows", type=int, default=50_000, help="row count the quality gate expects")
+    args = parser.parse_args(argv)
 
+    raw_path = args.raw or find_raw()
+    log.info("Reading %s", raw_path)
+    orders, returns = read_raw(raw_path)
+    df = clean(orders, returns)
 
-def load_postgres(df: pd.DataFrame, url: str) -> None:
-    from sqlalchemy import create_engine, text
-
-    engine = create_engine(url)
-    try:
-        # C5: загружаем в staging-таблицу, затем атомарный swap
-        df.to_sql(
-            "orders_staging",
-            engine,
-            if_exists="replace",
-            index=False,
-            method="multi",
-            chunksize=5000,
-        )
-        with engine.begin() as conn:
-            conn.execute(text("DROP TABLE IF EXISTS orders_old"))
-            conn.execute(text("ALTER TABLE IF EXISTS orders RENAME TO orders_old"))
-            conn.execute(text("ALTER TABLE orders_staging RENAME TO orders"))
-            conn.execute(text("DROP TABLE IF EXISTS orders_old"))
-            conn.execute(
-                text("CREATE INDEX IF NOT EXISTS idx_orders_order_date ON orders (order_date)")
-            )
-            conn.execute(
-                text("CREATE INDEX IF NOT EXISTS idx_orders_region ON orders (region)")
-            )
-        logger.info("PostgreSQL: атомарный swap orders завершён")
-    finally:
-        # M6: освобождаем пул соединений
-        engine.dispose()
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--postgres",
-        default=None,
-        help="postgresql://analyst:analyst@localhost:5432/superstore",
-    )
-    args = parser.parse_args()
-
-    raw_path = resolve_raw()
-    logger.info("Чтение: %s", raw_path)
-    df = pd.read_csv(raw_path, encoding="utf-8", low_memory=False)
-    logger.info("Строк в сырье: %s", f"{len(df):,}")
-
-    clean_df = clean(df)
-
-    # C4: атомарная запись Parquet (write → temp → rename)
-    OUT_PARQUET.parent.mkdir(parents=True, exist_ok=True)
-    tmp_parquet = OUT_PARQUET.with_suffix(".tmp.parquet")
-    clean_df.to_parquet(tmp_parquet, index=False)
-    tmp_parquet.replace(OUT_PARQUET)
-    logger.info("Сохранено: %s (%s строк)", OUT_PARQUET, f"{len(clean_df):,}")
-
-    # C2: ловим только duckdb.IOException (блокировка файла) —
-    # остальные ошибки пробрасываем наверх
-    try:
-        load_duckdb(clean_df, DUCKDB_PATH)
-        logger.info("DuckDB обновлён: %s", DUCKDB_PATH)
-    except duckdb.IOException as exc:
-        logger.warning(
-            "Файл DuckDB заблокирован (%s). "
-            "Закройте Streamlit/Jupyter и повторите ETL. Parquet сохранён.",
-            exc,
-        )
-
-    from superstore.etl.data_quality import print_report, run_checks
-
-    report = run_checks(clean_df)
+    report = run_checks(df, min_rows=args.min_rows)
     print_report(report)
     if not report.passed:
-        raise SystemExit("Проверки качества данных не пройдены")
+        raise SystemExit("Data quality checks failed; Parquet was not written")
 
-    if args.postgres:
-        load_postgres(clean_df, args.postgres)
-        logger.info("Загружено в PostgreSQL, таблица orders")
+    write_parquet(df, args.out)
+    log.info("Wrote %s (%s rows, %s orders)", args.out, f"{len(df):,}", f"{df['order_key'].nunique():,}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

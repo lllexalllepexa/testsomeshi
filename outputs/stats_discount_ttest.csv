@@ -1,0 +1,5 @@
+group,n_no_discount,n_discount,mean_profit_no_discount,mean_profit_discount,mean_diff,ci_low,ci_high,median_diff,p_value
+all,29009,22281,61.04,-13.61,-74.65,-77.66,-71.64,-20.6,0.0
+Furniture,4496,5380,103.56,-33.53,-137.09,-144.63,-129.56,-51.83,5.25e-262
+Office Supplies,19209,12064,31.69,-7.48,-39.17,-41.72,-36.62,-14.2,1.12e-195
+Technology,5304,4837,131.29,-6.74,-138.02,-148.21,-127.84,-56.32,2.16e-150

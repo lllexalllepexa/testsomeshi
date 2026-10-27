@@ -1,0 +1,2 @@
+formula,n,r2,adj_r2,cov_type,breusch_pagan_p
+"profit_margin ~ C(discount_band, Treatment(reference='0%')) + C(sub_category) + C(market)",51290,0.7664,0.7663,HC3,0.0

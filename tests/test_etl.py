@@ -1,155 +1,81 @@
-"""pytest: ETL и качество данных."""
-from pathlib import Path
+"""ETL: structure checks, real dates only, returns join, no input mutation."""
+
+from __future__ import annotations
 
 import pandas as pd
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-PARQUET = ROOT / "data" / "processed" / "orders_clean.parquet"
+from superstore.etl.load_and_clean import RawDataError, clean, find_raw, main, read_raw
 
 
-# ---------------------------------------------------------------------------
-# Фикстуры
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def df() -> pd.DataFrame:
-    """Загрузка реальных данных (пропуск, если ETL не запускался)."""
-    if not PARQUET.exists():
-        pytest.skip("Сначала запустите ETL")
-    return pd.read_parquet(PARQUET)
-
-
-@pytest.fixture()
-def sample_raw_df() -> pd.DataFrame:
-    """Синтетический DataFrame для unit-тестов, не зависящих от реальных данных."""
-    return pd.DataFrame(
-        {
-            "Order ID": [
-                "CA-2012-1001",
-                "CA-2012-1001",  # дубликат
-                "CA-2013-2002",
-                "MX-2014-3003",
-            ],
-            "Row ID": [1, 1, 2, 3],  # row_id=1 дублируется
-            "Sales": ["100.5", "100.5", "50.0", "200.0"],
-            "Profit": ["20.1", "20.1", "-5.0", "30.0"],
-            "year": [2012, 2012, 2013, 2014],
-            "weeknum": [10, 10, 15, None],  # None → fallback 26
-            "Ship Mode": [
-                "First Class",
-                "First Class",
-                "Standard Class",
-                "Same Day",
-            ],
-            "region": ["West", "West", "East", "Central"],
-            "category": ["Technology", "Technology", "Furniture", "Office Supplies"],
-            "segment": ["Consumer", "Consumer", "Corporate", "Home Office"],
-            "country": ["US", "US", "US", "MX"],
-        }
-    )
+def test_clean_fixture(clean_df):
+    assert len(clean_df) == 9  # the exact duplicate of line 3 is dropped
+    assert clean_df["row_id"].is_unique
+    assert clean_df["order_key"].nunique() == 6  # O-5 belongs to two customers -> two orders
+    line = clean_df.set_index("row_id")
+    assert line.loc[1, "delivery_days"] == 4
+    assert line.loc[6, "delivery_days"] == 3  # 2013-12-30 -> 2014-01-02 across the year boundary
+    assert line.loc[6, "year"] == 2013
+    assert line.loc[3, "profit_margin"] == pytest.approx(-0.4)
 
 
-# ---------------------------------------------------------------------------
-# Интеграционные тесты (на реальных данных)
-# ---------------------------------------------------------------------------
-
-def test_row_count(df: pd.DataFrame) -> None:
-    assert len(df) > 50_000
+def test_returns_join_normalizes_market(clean_df):
+    returned = set(clean_df.loc[clean_df["is_returned"], "row_id"])
+    # O-2/EU directly; O-4 is listed under "United States" in the Returns sheet but "US" in Orders
+    assert returned == {3, 6, 7}
 
 
-def test_required_columns(df: pd.DataFrame) -> None:
-    required = {
-        "order_id",
-        "sales",
-        "profit",
-        "region",
-        "category",
-        "order_date",
-        "profit_margin",
-    }
-    assert required.issubset(df.columns)
+def test_without_returns_flag_is_unknown(raw_orders):
+    df = clean(raw_orders)
+    assert df["is_returned"].isna().all()
 
 
-def test_revenue_positive(df: pd.DataFrame) -> None:
-    assert (df["sales"] > 0).all()
+def test_clean_does_not_mutate_input(raw_orders, raw_returns):
+    before = raw_orders.copy()
+    clean(raw_orders, raw_returns)
+    pd.testing.assert_frame_equal(raw_orders, before)
 
 
-def test_quality_module(df: pd.DataFrame) -> None:
-    from superstore.etl.data_quality import run_checks
-
-    report = run_checks(df)
-    assert report.passed
-
-
-# ---------------------------------------------------------------------------
-# Unit-тесты на синтетике (H6)
-# ---------------------------------------------------------------------------
-
-def test_clean_removes_duplicates(sample_raw_df: pd.DataFrame) -> None:
-    """C3: дедупликация должна убрать полный дубликат строки."""
-    from superstore.etl.load_and_clean import clean
-
-    result = clean(sample_raw_df)
-    assert len(result) == 3, f"Ожидалось 3 строки после дедупликации, получено {len(result)}"
+def test_broken_excel_dates_are_rejected(raw_orders):
+    raw_orders["Order Date"] = "00:00.0"
+    with pytest.raises(RawDataError, match="not dates"):
+        clean(raw_orders)
 
 
-def test_clean_produces_required_columns(sample_raw_df: pd.DataFrame) -> None:
-    """clean() должна создать order_date, ship_date, delivery_days, profit_margin."""
-    from superstore.etl.load_and_clean import clean
-
-    result = clean(sample_raw_df)
-    for col in ("order_date", "ship_date", "delivery_days", "profit_margin"):
-        assert col in result.columns, f"Колонка {col} отсутствует"
+def test_day_first_dates_are_parsed(raw_orders):
+    raw_orders["Order Date"] = pd.to_datetime(raw_orders["Order Date"]).dt.strftime("%d-%m-%Y")
+    df = clean(raw_orders)
+    assert df.set_index("row_id").loc[1, "order_date"] == pd.Timestamp("2012-01-10")
 
 
-def test_clean_no_nat_dates(sample_raw_df: pd.DataFrame) -> None:
-    """H2: после clean() не должно быть NaT в order_date."""
-    from superstore.etl.load_and_clean import clean
-
-    result = clean(sample_raw_df)
-    assert result["order_date"].notna().all(), "Обнаружены NaT-даты"
+def test_missing_column_is_rejected(raw_orders):
+    with pytest.raises(RawDataError, match="Sales"):
+        clean(raw_orders.drop(columns="Sales"))
 
 
-def test_clean_does_not_mutate_input(sample_raw_df: pd.DataFrame) -> None:
-    """H3: clean() не должна мутировать входной DataFrame."""
-    from superstore.etl.load_and_clean import clean
-
-    original_cols = list(sample_raw_df.columns)
-    original_len = len(sample_raw_df)
-    _ = clean(sample_raw_df)
-
-    assert list(sample_raw_df.columns) == original_cols, "Входной DF был мутирован (колонки)"
-    assert len(sample_raw_df) == original_len, "Входной DF был мутирован (строки)"
+def test_xlsx_with_returns_sheet_matches_csv(tmp_path, raw_orders, raw_returns, clean_df):
+    path = tmp_path / "Global Superstore.xlsx"
+    with pd.ExcelWriter(path) as writer:
+        raw_orders.to_excel(writer, sheet_name="Orders", index=False)
+        raw_returns.to_excel(writer, sheet_name="Returns", index=False)
+    orders, returns = read_raw(path)
+    pd.testing.assert_frame_equal(clean(orders, returns), clean_df, check_dtype=False)
 
 
-def test_clean_profit_margin_no_nan(sample_raw_df: pd.DataFrame) -> None:
-    """L1: profit_margin не должен быть NaN."""
-    from superstore.etl.load_and_clean import clean
+def test_find_raw(tmp_path):
+    with pytest.raises(FileNotFoundError, match="Данные"):
+        find_raw(tmp_path)
+    (tmp_path / "export.csv").write_text("x")
+    assert find_raw(tmp_path).name == "export.csv"
 
-    result = clean(sample_raw_df)
-    assert result["profit_margin"].notna().all(), "Обнаружены NaN в profit_margin"
 
+def test_main_writes_parquet_only_when_quality_passes(tmp_path):
+    from tests.conftest import FIXTURES
 
-def test_clean_strips_whitespace() -> None:
-    """M2: clean() должна убирать пробелы в строковых колонках."""
-    from superstore.etl.load_and_clean import clean
+    out = tmp_path / "orders_clean.parquet"
+    with pytest.raises(SystemExit, match="Data quality"):
+        main(["--raw", str(FIXTURES / "orders.csv"), "--out", str(out)])  # 9 rows < 50,000
+    assert not out.exists()
 
-    df = pd.DataFrame(
-        {
-            "Order ID": ["CA-2012-1001"],
-            "Row ID": [1],
-            "Sales": ["100.0"],
-            "Profit": ["10.0"],
-            "year": [2012],
-            "weeknum": [10],
-            "Ship Mode": ["  First Class  "],
-            "region": [" West "],
-            "category": ["Technology "],
-            "segment": ["Consumer"],
-            "country": ["US"],
-        }
-    )
-    result = clean(df)
-    assert result["region"].iloc[0] == "West"
-    assert result["ship_mode"].iloc[0] == "First Class"
+    assert main(["--raw", str(FIXTURES / "orders.csv"), "--out", str(out), "--min-rows", "5"]) == 0
+    assert len(pd.read_parquet(out)) == 9

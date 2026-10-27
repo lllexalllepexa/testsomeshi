@@ -1,5 +1,7 @@
-# Airflow на Windows — только через Docker (на хосте нет модуля fcntl).
-# Запуск: docker compose -f docker-compose.airflow.yml run --rm airflow-dag-test
+# Run the DAG once inside the official Airflow image (Windows hosts cannot run Airflow natively).
+#   docker compose -f docker-compose.airflow.yml run --rm airflow-dag-test
+# The pipeline's packages are installed without the pins from requirements.txt: the Airflow image
+# ships its own constrained versions (for example SQLAlchemy < 2), and the pipeline does not need them pinned.
 
 services:
   airflow-dag-test:
@@ -18,6 +20,6 @@ services:
       - -c
       - |
         set -e
-        pip install --quiet pandas pyarrow duckdb scipy scikit-learn matplotlib seaborn
+        pip install --quiet duckdb pyarrow python-calamine scipy statsmodels matplotlib
         airflow db migrate
         airflow dags test superstore_etl $${LOGICAL_DATE:-2024-01-01}

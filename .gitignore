@@ -4,20 +4,21 @@ __pycache__/
 venv/
 .env
 .airflow/
-chroma_db/
 logs/
 *.log
 .DS_Store
 .idea/
 .vscode/
 .pytest_cache/
-.Rhistory
+.ruff_cache/
 .ipynb_checkpoints/
 
-# данные (в git только описание и картинки в docs/)
-data/raw/*.csv
+# Raw download stays local (see README, «Данные»); the cleaned Parquet is committed
+data/raw/*
+!data/raw/.gitkeep
 data/processed/*
-!data/processed/.gitkeep
+!data/processed/orders_clean.parquet
 
-# duckdb lock
+# Local warehouse, rebuilt by `python -m superstore.pipeline`
 *.duckdb
+*.duckdb.wal

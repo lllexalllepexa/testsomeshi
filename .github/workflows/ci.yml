@@ -1,58 +1,22 @@
-name: CI
+name: checks
 
+# Manual trigger only: GitHub-hosted runners are unavailable on this account, and automatic runs
+# would mark every commit as failed. The same checks run locally via `python scripts/check.py` and the
+# pre-commit hook. Restore the push / pull_request triggers when hosted runners are available.
 on:
-  push:
-    branches: [main, master]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt pytest
-      - run: |
-          # минимальный CSV для CI
-          mkdir -p data/raw data/processed
-          python -c "
-          import pandas as pd
-          from pathlib import Path
-          p = Path('data/raw/global_superstore.csv')
-          if not p.exists():
-              df = pd.DataFrame({
-                  'Category': ['Office Supplies']*100,
-                  'City': ['LA']*100,
-                  'Country': ['US']*100,
-                  'Customer ID': ['X']*100,
-                  'Customer Name': ['A']*100,
-                  'Discount': [0.0]*100,
-                  'Market': ['US']*100,
-                  'ji_lu-shu': [1]*100,
-                  'Order Date': ['2012-01-01']*100,
-                  'Order ID': [f'CA-2012-{i}' for i in range(100)],
-                  'Order Priority': ['Medium']*100,
-                  'Product ID': ['P']*100,
-                  'Product Name': ['Item']*100,
-                  'Profit': [10.0]*100,
-                  'Quantity': [2]*100,
-                  'Region': ['West']*100,
-                  'Row ID': list(range(100)),
-                  'Sales': [50.0]*100,
-                  'Segment': ['Consumer']*100,
-                  'Ship Date': ['2012-01-05']*100,
-                  'Ship Mode': ['Standard Class']*100,
-                  'Shipping Cost': [1.0]*100,
-                  'State': ['CA']*100,
-                  'Sub-Category': ['Paper']*100,
-                  'Year': [2012]*100,
-                  'Market2': ['NA']*100,
-                  'weeknum': [10]*100,
-              })
-              df.to_csv(p, index=False)
-          "
-      - run: python -m superstore.etl.load_and_clean
-      - run: python -m superstore.etl.data_quality_runner
-      - run: pytest tests/ -q
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Lint, format, tests (fixture marts, quality gate, statistics, end-to-end, dashboard, PostgreSQL)
+        run: python scripts/check.py

@@ -1,6 +1,12 @@
+"""Airflow DAG: raw workbook -> Parquet -> quality gate -> DuckDB marts -> statistics -> charts.
+
+Each task runs one step of the same CLI used locally, so the DAG adds orchestration (retries, ordering,
+history) without a second copy of the logic. When no raw file is present, the ETL task is skipped and
+the downstream tasks run on the committed Parquet.
+"""
+
 from __future__ import annotations
 
-import logging
 import os
 import subprocess
 import sys
@@ -8,52 +14,30 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from airflow import DAG
+from airflow.exceptions import AirflowSkipException
 from airflow.operators.python import PythonOperator
+from airflow.utils.trigger_rule import TriggerRule
 
-logger = logging.getLogger(__name__)
-
-
-def _project_root() -> Path:
-    if env := os.environ.get("AIRFLOW_PROJECT_ROOT"):
-        return Path(env)
-    here = Path(__file__).resolve()
-    for candidate in (here.parents[1], here.parents[2], *here.parents):
-        if (candidate / "superstore" / "etl").is_dir():
-            return candidate
-    return here.parents[2]
+PROJECT_ROOT = Path(os.environ.get("AIRFLOW_PROJECT_ROOT", Path(__file__).resolve().parents[1]))
 
 
-PROJECT_ROOT = _project_root()
+def _run(*args: str) -> None:
+    subprocess.run([sys.executable, *args], cwd=PROJECT_ROOT, check=True)
 
 
-def _run_python_module(module: str, **context) -> None:
-    subprocess.run(
-        [sys.executable, "-m", module],
-        cwd=str(PROJECT_ROOT),
-        check=True,
-    )
+def _etl() -> None:
+    raw_dir = PROJECT_ROOT / "data" / "raw"
+    if not any(raw_dir.glob(p) for p in ("*.xls", "*.xlsx", "*.csv")):
+        raise AirflowSkipException("No raw file in data/raw; using the committed Parquet")
+    _run("-m", "superstore.etl.load_and_clean")
 
 
-def _validate_data_quality(**context) -> None:
-    import pandas as pd
-
-    from superstore.etl.data_quality import run_checks
-
-    path = PROJECT_ROOT / "data" / "processed" / "orders_clean.parquet"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing {path}; run ETL task first")
-    df = pd.read_parquet(path)
-    report = run_checks(df)
-    if not report.passed:
-        failed = [c["check"] for c in report.checks if not c["ok"]]
-        raise ValueError(f"Quality failed: {failed}")
-    logger.info("Проверка пройдена: %s строк", f"{len(df):,}")
+def _step(name: str) -> None:
+    _run("-m", "superstore.pipeline", "--step", name)
 
 
-# H4: включены retries, execution_timeout; убран email_on_failure=False
 default_args = {
     "owner": "data-analyst",
-    "depends_on_past": False,
     "retries": 2,
     "retry_delay": timedelta(minutes=2),
     "execution_timeout": timedelta(minutes=30),
@@ -61,36 +45,21 @@ default_args = {
 
 with DAG(
     dag_id="superstore_etl",
-    description="Загрузка CSV → Parquet/DuckDB → проверка качества",
+    description="Global Superstore: raw -> Parquet -> quality -> marts -> statistics -> charts",
     default_args=default_args,
     start_date=datetime(2024, 1, 1),
-    # L5: исторические данные 2011-2014 — ежедневный перезапуск не нужен
-    schedule=None,
+    schedule=None,  # historical 2011-2014 data: run on demand
     catchup=False,
     tags=["superstore", "etl", "portfolio"],
 ) as dag:
-    # C1: исправлены имена модулей (python.* → superstore.*)
-    etl = PythonOperator(
-        task_id="run_python_etl",
-        python_callable=_run_python_module,
-        op_kwargs={"module": "superstore.etl.load_and_clean"},
-    )
-
-    eda = PythonOperator(
-        task_id="run_eda_plots",
-        python_callable=_run_python_module,
-        op_kwargs={"module": "superstore.analysis.eda"},
-    )
-
-    validate = PythonOperator(
-        task_id="validate_data_quality",
-        python_callable=_validate_data_quality,
-    )
-
-    stats = PythonOperator(
-        task_id="run_stats_models",
-        python_callable=_run_python_module,
-        op_kwargs={"module": "superstore.analysis.stats_models"},
-    )
-
-    etl >> [eda, validate] >> stats
+    etl = PythonOperator(task_id="etl_raw_to_parquet", python_callable=_etl)
+    steps = [
+        PythonOperator(
+            task_id=name,
+            python_callable=_step,
+            op_kwargs={"name": name},
+            trigger_rule=TriggerRule.NONE_FAILED,  # still run when the ETL task was skipped
+        )
+        for name in ("validate", "marts", "stats", "charts")
+    ]
+    etl >> steps[0] >> steps[1] >> steps[2] >> steps[3]

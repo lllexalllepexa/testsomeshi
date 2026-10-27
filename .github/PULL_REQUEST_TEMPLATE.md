@@ -4,5 +4,5 @@
 
 ## Проверка
 
-- [ ] `pytest tests/ -q`
-- [ ] `python -m superstore.etl.load_and_clean`
+- [ ] `python scripts/check.py` (ruff + все тесты)
+- [ ] `python -m superstore.pipeline` и закоммичены обновлённые `outputs/` и `docs/images/`

@@ -1,25 +1,22 @@
 # Airflow
 
-DAG: [`dags/superstore_etl.py`](../dags/superstore_etl.py) — ETL → проверки → EDA → статистика.
+DAG: [`dags/superstore_etl.py`](../dags/superstore_etl.py) — `etl_raw_to_parquet → validate → marts → stats → charts`.
 
-## Windows
+Каждая задача вызывает один шаг `python -m superstore.pipeline`, поэтому логика не дублируется: DAG добавляет только порядок, повторы и историю запусков. Если в `data/raw/` нет исходного файла, задача ETL помечается как пропущенная, а остальные работают на закоммиченном Parquet.
 
-CLI `airflow` в обычном venv **не стартует** (модуль `fcntl` только в Linux). Варианты:
-
-1. **Docker** — `.\scripts\run_airflow_docker.ps1` (нужен запущенный Docker Desktop, `docker info` без ошибок).
-2. **WSL2** — команды ниже из каталога проекта в Ubuntu.
-
-## Linux / WSL
+## Запуск в Docker (Windows, macOS, Linux)
 
 ```bash
-export AIRFLOW_HOME=./.airflow
-export AIRFLOW_PROJECT_ROOT=$PWD
-export PYTHONPATH=.
-pip install apache-airflow pandas pyarrow duckdb scipy scikit-learn
+docker compose -f docker-compose.airflow.yml run --rm airflow-dag-test
+```
+
+## Linux / WSL без Docker
+
+```bash
+export AIRFLOW_HOME=$PWD/.airflow AIRFLOW_PROJECT_ROOT=$PWD PYTHONPATH=$PWD
+pip install apache-airflow==2.10.4 duckdb pyarrow python-calamine scipy statsmodels matplotlib
 airflow db migrate
 airflow dags test superstore_etl 2024-01-01
 ```
 
-## Без запуска
-
-На GitHub достаточно просмотра кода DAG и [otchet.md](otchet.md).
+На Windows без Docker Airflow не запускается (нет модуля `fcntl`).

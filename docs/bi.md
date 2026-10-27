@@ -1,30 +1,28 @@
-# Внешние BI-системы
+# Подключение BI-инструментов
 
-Данные после ETL: `data/processed/orders_clean.parquet` или таблица `orders` в PostgreSQL.
+Источники после пайплайна:
 
-## Superset
+- `data/processed/orders_clean.parquet` — очищенные строки заказов (в репозитории);
+- `data/processed/superstore.duckdb` — таблица `orders`, view `stg_orders` и витрины `mart_*` (создаётся `python -m superstore.pipeline`);
+- PostgreSQL — таблица `orders` и view `mart_region_year`, `mart_discount_bands`.
 
-1. `docker compose up -d postgres`
-2. `python -m superstore.etl.load_and_clean --postgres postgresql://analyst:analyst@localhost:5432/superstore`
-3. Dataset: `mart_region_year` или `orders`.
+## PostgreSQL для Superset, DataLens, Power BI
 
-## Yandex DataLens
-
-Загрузка Parquet/CSV или подключение к ClickHouse/Postgres из `docker-compose.yml`.
-
-## Power BI
-
-Источник Parquet или PostgreSQL. Примеры мер:
-
-```
-Total Revenue = SUM(orders[sales])
-Margin % = DIVIDE(SUM(orders[profit]), SUM(orders[sales]))
+```bash
+docker compose up -d postgres
+python -m superstore.loaders.load_postgres
 ```
 
-## Streamlit в репозитории
+Строка подключения: `postgresql://analyst:analyst@localhost:5432/superstore` (локальная демо-база).
 
-```powershell
-.\scripts\run_streamlit.ps1
+## Меры для Power BI
+
+```
+Выручка = SUM(orders[sales])
+Прибыль = SUM(orders[profit])
+Маржа = DIVIDE([Прибыль], [Выручка])
+Заказы = DISTINCTCOUNT(orders[order_key])
+Доля выручки со скидкой > 20% = DIVIDE(CALCULATE([Выручка], orders[discount] > 0.2), [Выручка])
 ```
 
-Статические скрины — в [otchet.md](otchet.md).
+`order_key` (Order ID + Customer ID) нужен потому, что Order ID в этом датасете повторяется в разных странах.

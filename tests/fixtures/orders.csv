@@ -1,0 +1,11 @@
+Row ID,Order ID,Order Date,Ship Date,Ship Mode,Customer ID,Customer Name,Segment,City,State,Country,Postal Code,Market,Region,Product ID,Category,Sub-Category,Product Name,Sales,Quantity,Discount,Profit,Shipping Cost,Order Priority
+1,O-1,2012-01-10,2012-01-14,Standard Class,C1,Ann Lee,Consumer,New York City,New York,United States,10024,US,East,TEC-1,Technology,Phones,Phone A,100,1,0,30,10,Medium
+2,O-1,2012-01-10,2012-01-14,Standard Class,C1,Ann Lee,Consumer,New York City,New York,United States,10024,US,East,OFF-1,Office Supplies,Paper,Paper A,50,2,0,10,5,Medium
+3,O-2,2012-02-05,2012-02-07,Second Class,C2,Bob Ray,Corporate,Berlin,Berlin,Germany,,EU,Central,FUR-1,Furniture,Tables,Table A,200,1,0.4,-80,20,High
+4,O-3,2013-03-01,2013-03-01,Same Day,C3,Cid Moe,Home Office,Sydney,New South Wales,Australia,,APAC,Oceania,FUR-2,Furniture,Chairs,Chair A,100,1,0.1,15,12,Critical
+5,O-3,2013-03-01,2013-03-01,Same Day,C3,Cid Moe,Home Office,Sydney,New South Wales,Australia,,APAC,Oceania,TEC-1,Technology,Phones,Phone A,100,1,0.2,5,12,Critical
+6,O-4,2013-12-30,2014-01-02,First Class,C1,Ann Lee,Consumer,New York City,New York,United States,10024,US,East,OFF-2,Office Supplies,Binders,Binder A,40,4,0.7,-60,3,Low
+7,O-4,2013-12-30,2014-01-02,First Class,C1,Ann Lee,Consumer,New York City,New York,United States,10024,US,East,OFF-1,Office Supplies,Paper,Paper A,60,3,0,15,3,Low
+8,O-5,2014-06-15,2014-06-20,Standard Class,C4,Dan Fox,Corporate,London,England,United Kingdom,,EU,North,TEC-1,Technology,Phones,Phone A,300,2,0.25,-10,30,Medium
+9,O-5,2014-07-01,2014-07-05,Standard Class,C5,Eve Kim,Consumer,Kingston,Kingston,Jamaica,,LATAM,Caribbean,OFF-1,Office Supplies,Paper,Paper A,20,1,0,5,2,Medium
+3,O-2,2012-02-05,2012-02-07,Second Class,C2,Bob Ray,Corporate,Berlin,Berlin,Germany,,EU,Central,FUR-1,Furniture,Tables,Table A,200,1,0.4,-80,20,High

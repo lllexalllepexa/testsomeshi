@@ -1,9 +1,11 @@
 # Airflow DAG
 
-Файл `superstore_etl.py`:
+[`superstore_etl.py`](superstore_etl.py):
 
 ```
-run_python_etl → [run_eda_plots, validate_data_quality] → run_stats_models
+etl_raw_to_parquet → validate → marts → stats → charts
 ```
 
-Инструкция по запуску: [docs/airflow.md](../docs/airflow.md).
+Each task calls one step of `python -m superstore.pipeline`, the same CLI used locally. If `data/raw/` is empty, the ETL task is skipped and the rest runs on the committed Parquet.
+
+How to run: [docs/airflow.md](../docs/airflow.md).
